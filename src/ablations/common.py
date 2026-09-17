@@ -32,14 +32,15 @@ INSERTION_LEVEL = {
 
 # Whether the ablation's parameters are drawn once per sac (shared by the 16
 # crops) or once per crop (protocole "Ce qui est tiré par sac, ce qui est
-# tiré par crop"). A5 has no drawn parameter at all — its target is fixed by
-# the crop's size, not sampled.
+# tiré par crop"). A5's target slope is jittered (+/- a5_spectral_slope.
+# ALPHA_JITTER) around the crop size's reference value, drawn fresh per
+# crop rather than fixed - see that module's docstring for why.
 DRAWN_PER = {
     "A1": None,
     "A2": None,
     "A3": "crop",
     "A4": "sac",
-    "A5": None,
+    "A5": "crop",
     "A6": "sac",
     "A7": None,
 }

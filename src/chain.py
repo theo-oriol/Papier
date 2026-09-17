@@ -171,7 +171,7 @@ def build_bag(
 
         if "A5" in condition:
             t0 = time.perf_counter()
-            target_alpha = a5_spectral_slope.target_alpha_for_crop_source(size)
+            target_alpha = a5_spectral_slope.draw_target_alpha(size, rng)
             crop, a5_meta = a5_spectral_slope.apply(crop, target_alpha)
             this_crop_meta["A5"] = a5_meta
             t_a5 += time.perf_counter() - t0
