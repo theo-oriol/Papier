@@ -1,0 +1,15 @@
+# Model hyperparameters, protocole §1 - DINOv3-L variant. Identical to
+# model.yaml (the protocol's own choice, still the default every
+# configs/train_*.yaml includes) - this file exists as the explicit "L" of
+# the S/L/H set alongside model_s.yaml/model_h.yaml, for configs that want
+# to name their backbone size rather than rely on model.yaml's default.
+backbone:
+  name: dinov3_vitl16
+  lora:
+    r: 8
+    alpha: 18
+    dropout: 0.05
+    target_modules: [attn.qkv, attn.proj]   # every block, matched by suffix
+feat_dim: 1024        # DINOv3-L (ViT-L/16) embedding size
+num_habitats: 10
+head_dropout: 0.1

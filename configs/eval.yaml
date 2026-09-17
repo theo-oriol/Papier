@@ -1,0 +1,6 @@
+# Evaluation run (protocole §7): repass one fold's validation set through
+# every fixed condition, at frozen weights.
+includes: [paths.yaml, model.yaml]
+batch_size: 1          # one sac (16 crops) per forward pass - see README "Memoire GPU"
+num_workers: 8
+n_bootstrap: 500        # resamples (by family) used to estimate each metric's variance for §7's inverse-variance fold combination

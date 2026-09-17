@@ -1,0 +1,76 @@
+# Machine-specific paths. Nothing else in this project should hardcode a path —
+# everything reads from here, so moving to another machine means editing this
+# one file. Found by scanning the disk for the files the protocol PDF names;
+# see README.md "Provenance des chemins" for how each one was identified.
+
+# Root of the NPY dataset (one *.rgb.zst + *.cand_128.zst + *.cand_224.zst per
+# specimen, vue "Back" uniquement — cf. protocole §2).
+# Reorganised on disk on 2026-09-14: the dataset now lives under a parent
+# folder holding all three views (Back/Belly/Side — see
+# scripts/build_grayscale_dataset.py, which uses that layout directly). The
+# old flat /media/.../Datasets/NEW_Segmented-Aves-Back-NPY no longer exists.
+dataset_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_no_ablation/NEW_Segmented-Aves-Back-NPY
+
+# Reorganised again on 2026-09-16: each offline cache now lives in its own
+# top-level folder, sibling to Familly_split_no_ablation (which holds only
+# the raw, unmodified dataset - Back/Belly/Side) - not nested inside it as
+# sibling "-A1"/"-A2"/... suffixed folders like before. Each of these paths
+# names the Back-view leaf directly (protocole §2, "vue Back uniquement" -
+# the one the training/eval pipeline actually reads); the build scripts
+# derive the Belly/Side siblings from this same path's parent (see each
+# script's own root-derivation check) - moving one of these paths to a
+# different view or a differently-laid-out root will make that check fail
+# loudly rather than silently building in the wrong place.
+
+# Where the offline-standardized A2 cache lives once scripts/build_a2_cache.py
+# has been run (protocole §2 : A2 "n'est pas calculée du tout, elle est lue
+# dans un jeu distinct, standardisé hors ligne"). Does not exist until built.
+dataset_a2_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A2/NEW_Segmented-Aves-Back-NPY
+
+# A1 and A7 are deterministic given the specimen (no drawn parameter), so —
+# same reasoning as A2 — they're precomputed once offline instead of being
+# recomputed by every sac that draws them online (classify_delhey_rgb-adjacent
+# CIELAB math was the dominant per-epoch cost; see README "Plan de reduction
+# du temps d'ablation"). Built by scripts/build_a1_cache.py / build_a7_cache.py.
+dataset_a1_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A1/NEW_Segmented-Aves-Back-NPY
+dataset_a7_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A7/NEW_Segmented-Aves-Back-NPY
+
+# A6's per-pixel Delhey colour classification is also deterministic given the
+# specimen (only the *category to remove* is drawn per sac, not the
+# classification itself) - precomputed once here instead of being recomputed
+# by every consumer (A6's own online draw, the A6 presence manifest) that
+# needs it. Built by scripts/build_a6_classification_cache.py; does not
+# exist until built. One int8 label map per specimen (see
+# src/ablations/a6_colour_removal.py build_classification()).
+dataset_a6_classification_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A6_classification/NEW_Segmented-Aves-Back-NPY
+
+# Fold tables and crosswalk (protocole §7). Row/family counts were checked
+# against the numbers printed in the PDF (37890+54600+30471 images,
+# 83+77+80 families, 241 families / 36 orders / 9143 species in the
+# crosswalk) — they match exactly, so this is almost certainly the source
+# the protocol describes.
+fold_dir: /home/oriol@newcefe.newage.fr/Models/bird_project/data/cross/cross_version_1_FAM
+crosswalk_csv: /home/oriol@newcefe.newage.fr/Models/bird_project/data/raw/crosswalk_image_habitat_v0.csv
+habitat_codes_json: /home/oriol@newcefe.newage.fr/Models/bird_project/configs/labelname.json
+habitat_names_json: /home/oriol@newcefe.newage.fr/Models/bird_project/configs/labeltoname.json
+
+# CIELAB / colour-naming module supplied for the project (A1, A2's building
+# block, A6). Copied as-is into src/colorspace.py — see that file's header.
+color_module_source: /home/oriol@newcefe.newage.fr/Downloads/color.py
+w2c_resource_source: /home/oriol@newcefe.newage.fr/Downloads/w2c.mat
+
+# DINOv3 backbones: local torch.hub checkout + pretrained weights, same
+# pattern already used in bird_project/src/models/backbone.py. One entry per
+# backbone_name that configs/model_{s,l,h}.yaml can select (src/model/
+# backbone.py looks this dict up by cfg["backbone"]["name"]).
+# dinov3_vits16 (S, embed_dim=384) and dinov3_vit7b16 (the 7B "giant" model,
+# embed_dim=4096 - used here as the "H" tier since the real dinov3_vith16plus,
+# embed_dim=1280, has no weights downloaded on this machine) added 2026-09-17.
+dinov3_repo: /home/oriol@newcefe.newage.fr/Models/dinov3
+dinov3_weights:
+  dinov3_vits16: /media/oriol@newcefe.newage.fr/LaCie/weights/dinov3_vits16.pth
+  dinov3_vitl16: /media/oriol@newcefe.newage.fr/LaCie/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+  dinov3_vit7b16: /media/oriol@newcefe.newage.fr/LaCie/weights/dinov3_vit7b16_pretrain_lvd1689m-a955f4ea.pth
+
+# Where run outputs (checkpoints, logs, resolved configs) get written.
+runs_dir: /home/oriol@newcefe.newage.fr/Models/paper_code/runs

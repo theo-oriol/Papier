@@ -1,0 +1,6 @@
+# One training run: fold 1, main model (ablations drawn online).
+run_name: main_fold1
+fold: 1
+sham: false
+seed: 20260911   # date this protocol was locked in, arbitrary but fixed
+includes: [paths.yaml, model.yaml, optim.yaml]

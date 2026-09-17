@@ -1,0 +1,12 @@
+# Model hyperparameters, protocole §1. Frozen backbone except the LoRA
+# adapters; everything here is trained from scratch (attention, both heads).
+backbone:
+  name: dinov3_vitl16
+  lora:
+    r: 8
+    alpha: 18
+    dropout: 0.05
+    target_modules: [attn.qkv, attn.proj]   # every block, matched by suffix
+feat_dim: 1024        # DINOv3-L (ViT-L/16) embedding size
+num_habitats: 10
+head_dropout: 0.1

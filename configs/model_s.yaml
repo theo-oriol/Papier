@@ -1,0 +1,16 @@
+# Model hyperparameters, protocole §1 - DINOv3-S variant. Same shape as
+# model.yaml/model_l.yaml, only backbone.name and feat_dim change (they're
+# architecture-determined, not a tunable choice); LoRA/head settings are
+# kept identical across sizes so a size swap isolates that one variable.
+# By far the cheapest of the three (embed_dim=384) - a reasonable choice
+# for smoke-testing the pipeline before spending GPU time on model_l/model_h.
+backbone:
+  name: dinov3_vits16
+  lora:
+    r: 8
+    alpha: 18
+    dropout: 0.05
+    target_modules: [attn.qkv, attn.proj]   # every block, matched by suffix
+feat_dim: 384         # DINOv3-S (ViT-S/16) embedding size
+num_habitats: 10
+head_dropout: 0.1

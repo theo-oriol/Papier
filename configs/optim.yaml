@@ -1,0 +1,33 @@
+# Optimisation hyperparameters, protocole §1 "Optimisation" table.
+epochs_max: 100
+early_stop_patience: 10       # on the *smoothed train loss*, no validation metric enters this
+early_stop_smoothing: 5       # epochs averaged into the smoothed loss before comparing
+optimizer: adam
+weight_decay: 0.01
+learning_rate: 1.0e-4
+scheduler: cosine_annealing    # over the full epochs_max horizon, even though early stop
+                                # usually interrupts it before it completes
+batch_size: 64                 # sacs; 64 x 16 crops = 1024 crops/step (protocole §1)
+n_crops_per_size: 8             # -> 16 crops per sac (8x128 + 8x224)
+num_workers: 8
+
+# batch_size=64 is the protocol's number, not this machine's: a single DINOv3-L
+# forward+backward on the 16 crops of just ONE sac already uses ~5.7GB on the
+# 16GB GPU here (measured with bf16 autocast — see README "Memoire GPU").
+# micro_batch_size is how many sacs actually go through the model at once;
+# the Trainer accumulates gradients over batch_size / micro_batch_size steps
+# before every optimizer.step(), so the *effective* batch is still 64 sacs.
+# Raise this if you run on a bigger GPU.
+micro_batch_size: 1
+use_amp: true
+
+# Adaptive KL/BCE loss weighting (src/training/loss_balancing.py) - a
+# deliberate departure from protocole §1's fixed 0.5/0.5 "pondération KL /
+# BCE": once per epoch, reweight towards whichever term has stalled
+# (EMA-smoothed loss ratio vs loss_balance_lag_epochs epochs ago, softmax'd
+# by loss_balance_temperature). Both start at 0.5/0.5 and stay there until
+# loss_balance_lag_epochs epochs of history exist.
+loss_balance_ema_decay: 0.9        # persistence of the EMA - closer to 1 = slower to move
+loss_balance_lag_epochs: 5         # how many epochs back the "stalled?" comparison looks
+loss_balance_temperature: 0.1      # softmax temperature - lower = more aggressive rebalancing
+loss_balance_weight_band: [0.2, 0.8]   # neither term's weight ever leaves this band

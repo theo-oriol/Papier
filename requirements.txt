@@ -1,0 +1,18 @@
+# Tested against the "torch" conda environment already on this machine
+# (torch 2.5.1, cuda available). Versions below are what was actually used;
+# pin more strictly if you need to reproduce exact numerics.
+torch>=2.5
+torchvision>=0.20
+peft>=0.19
+numpy>=2.0
+pandas>=2.2
+scipy
+scikit-image>=0.26
+scikit-learn>=1.6
+opencv-python>=4.11
+zstandard>=0.25
+PyYAML
+tqdm
+matplotlib
+jupyter
+ipykernel

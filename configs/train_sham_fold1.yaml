@@ -1,0 +1,7 @@
+# The sham twin of fold 1 (protocole §4): identical in every respect
+# except the condition is always the reference — never any ablation drawn.
+run_name: sham_fold1
+fold: 1
+sham: true
+seed: 20260911
+includes: [paths.yaml, model.yaml, optim.yaml]

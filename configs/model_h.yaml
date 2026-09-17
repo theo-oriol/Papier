@@ -1,0 +1,28 @@
+# Model hyperparameters, protocole §1 - DINOv3 "H" variant.
+#
+# This is dinov3_vit7b16, the 7-billion-parameter "giant" model - not the
+# literal dinov3_vith16plus ("Huge+", embed_dim=1280, ~630M params), which
+# has no weights downloaded on this machine. vit7b16's weights (~25GB on
+# disk, frozen fp32) were what was actually available, so it's standing in
+# as this project's "H" tier; see configs/paths.yaml's dinov3_weights entry
+# for both.
+#
+# GPU memory warning: model.yaml's own comment notes DINOv3-L (~304M params)
+# already uses ~5.7GB for one sac's 16 crops on this machine's 16GB GPU.
+# vit7b16 is ~23x more parameters (7B vs 304M) - just holding the frozen
+# weights resident (even with requires_grad=False) needs on the order of
+# 15-28GB depending on dtype, before any activation memory for a forward
+# pass. This will not fit on a 16GB GPU. Only use this config on hardware
+# with substantially more VRAM (multi-GPU / 80GB-class cards), or expect to
+# reduce crops-per-sac and/or run backbone forward passes at a much smaller
+# micro-batch than configs/optim.yaml's micro_batch_size: 1 already is.
+backbone:
+  name: dinov3_vit7b16
+  lora:
+    r: 8
+    alpha: 18
+    dropout: 0.05
+    target_modules: [attn.qkv, attn.proj]   # every block, matched by suffix
+feat_dim: 4096        # DINOv3 ViT-7B/16 embedding size
+num_habitats: 10
+head_dropout: 0.1
