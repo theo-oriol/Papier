@@ -14,7 +14,7 @@ and count them.
 from __future__ import annotations
 
 from itertools import combinations
-from typing import Dict, List, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 
@@ -40,7 +40,19 @@ def admissible_by_size() -> Dict[int, List[frozenset]]:
 _ADMISSIBLE_BY_SIZE = admissible_by_size()
 
 
-def draw_condition(rng: np.random.Generator) -> Condition:
+def draw_condition(rng: np.random.Generator, enabled_codes: Optional[FrozenSet[str]] = None) -> Condition:
+    """`enabled_codes`, if given, restricts the draw to admissible
+    conditions using only codes from that set (rejection sampling on the
+    same rng - still deterministic for a given seed, just consumes a few
+    more draws whenever a disallowed code comes up). None (the default)
+    draws from the full protocol pool exactly as protocole §4 specifies -
+    real training (Trainer/BagDataset without an explicit enabled_codes)
+    always uses that default. This parameter exists for demos/notebooks
+    that want to avoid ablations whose offline cache isn't built yet (e.g.
+    A7 - see notebooks/02_training_dataloader_demo.ipynb), not for
+    production runs: excluding a code changes the effective marginal
+    probabilities away from the protocol's own table.
+    """
     sizes = list(K_PROBABILITIES.keys())
     probs = list(K_PROBABILITIES.values())
     # Choisi la pool d'ablation aléatoirement entre 0 et 3 (en utilisant K_PROBABILITIES)
@@ -49,7 +61,18 @@ def draw_condition(rng: np.random.Generator) -> Condition:
     # Choisi la combinaison d'ablation aléatoirement dans le pool choisi précedemment 
     codes = pool[int(rng.integers(len(pool)))]
     # Condition est un objet qui stock les conditions selectionné
-    return Condition(active=codes)
+    condition = Condition(active=codes)
+
+    if enabled_codes is None or condition.active <= enabled_codes:
+        return condition
+
+    for _ in range(1000):
+        condition = draw_condition(rng)
+        if condition.active <= enabled_codes:
+            return condition
+    raise RuntimeError(
+        f"couldn't draw an admissible condition using only {sorted(enabled_codes)} in 1000 tries"
+    )
 
 
 def all_admissible_conditions() -> List[Condition]:

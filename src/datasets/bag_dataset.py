@@ -10,7 +10,7 @@ thing that distinguishes the sham run from the main run is that one line.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, FrozenSet, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -33,7 +33,14 @@ class BagDataset(Dataset):
         cfg: dict,
         run_seed: int,
         sham: bool = False,
+        enabled_codes: Optional[FrozenSet[str]] = None,
     ):
+        # None (the default, what Trainer always uses) draws the full
+        # protocol pool exactly as protocole §4 specifies - see
+        # combinations.draw_condition()'s enabled_codes docstring. Only
+        # meant for demos/notebooks that want to avoid ablations whose
+        # offline cache isn't built yet.
+        self.enabled_codes = enabled_codes
         self.stems = df["stem"].to_numpy()
         self.habitats = np.stack(df["habitat"].to_numpy())
         self.dataset_dir = Path(cfg["dataset_dir"])
@@ -63,7 +70,7 @@ class BagDataset(Dataset):
         # Crée un random generator
         rng = derive_rng(self.run_seed, self.epoch, index, stem)
 
-        condition = Condition() if self.sham else draw_condition(rng)
+        condition = Condition() if self.sham else draw_condition(rng, enabled_codes=self.enabled_codes)
         crops, meta = chain.build_bag(
             self.dataset_dir, self.dataset_a1_dir, self.dataset_a2_dir, self.dataset_a7_dir, stem, condition, rng,
             dataset_a6_class_dir=self.dataset_a6_class_dir,

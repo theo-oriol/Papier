@@ -45,6 +45,64 @@ N_CROPS_PER_SIZE = 8
 CROP_SIZES = (128, 224)
 
 
+def _blur_near_crops(
+    canvas: np.ndarray, crop_specs, k: int, a4_params: Dict[str, int] = None
+) -> Tuple[np.ndarray, float, float]:
+    """Median-blur (and, if `a4_params` is given, apply A4's directional
+    blur too) only within each crop's own padded neighbourhood instead of
+    touching the whole canvas. Exact, not an approximation: both operations
+    are purely local (median blur: every output pixel depends only on its
+    own k x k neighbourhood; A4: a 1D box filter along one axis only), so
+    extracting a padded sub-block, running both filters on it in the same
+    order the full-canvas pipeline would, and keeping only its interior
+    reproduces exactly what the full-canvas computation would have given at
+    those same pixels - verified bit-identical against the full-canvas
+    version across both A4 orientations, several lengths, and crops at/near
+    the canvas edge. The interior never sees the sub-block's own artificial
+    edge (or, where the sub-block's edge coincides with the canvas's own
+    edge, cv2 replicates/reflects identically there regardless of which
+    array it was called on).
+
+    Padding: median blur alone needs k//2 in every direction. A4 (if given)
+    additionally needs length//2 *in its own blur axis only* (x for
+    theta=0, y for theta=90) - plus another k//2 beyond that, since the
+    pixel A4 reads at the edge of its own window must itself already be
+    correctly median-blurred, which needs its own k x k neighbourhood of
+    real data. Only correct for callers where nothing downstream ever reads
+    a canvas pixel outside the given crops (see build_bag()).
+
+    Returns (canvas_with_crops_blurred, seconds_spent_on_median, seconds_spent_on_a4).
+    """
+    median_pad = k // 2
+    if a4_params is not None:
+        theta, length = a4_params["theta"], a4_params["length"]
+        extra = length // 2
+        y_pad = median_pad + (extra if theta == 90 else 0)
+        x_pad = median_pad + (extra if theta == 0 else 0)
+    else:
+        y_pad = x_pad = median_pad
+
+    out = canvas.copy()
+    h, w = canvas.shape[:2]
+    t_median = t_a4 = 0.0
+    for size, y, x in crop_specs:
+        y0, y1 = max(0, y - y_pad), min(h, y + size + y_pad)
+        x0, x1 = max(0, x - x_pad), min(w, x + size + x_pad)
+
+        t0 = time.perf_counter()
+        block = cv2.medianBlur(canvas[y0:y1, x0:x1], k)
+        t_median += time.perf_counter() - t0
+
+        if a4_params is not None:
+            t0 = time.perf_counter()
+            block = a4_directional_blur.apply(block, theta=theta, length=length)
+            t_a4 += time.perf_counter() - t0
+
+        iy, ix = y - y0, x - x0
+        out[y : y + size, x : x + size] = block[iy : iy + size, ix : ix + size]
+    return out, t_median, t_a4
+
+
 def build_bag(
     dataset_dir: Path,
     dataset_a1_dir: Path,
@@ -103,21 +161,53 @@ def build_bag(
         dataset_a6_class_dir=dataset_a6_class_dir,
     )
 
-    # --- step 2: vertical flip, shared by the whole sac - drawn here (same
-    # rng draw order as before) but *applied* after step 3's median blur
-    # instead of before it. A symmetric kernel's median blur commutes
-    # exactly with a vertical flip, border replication included (verified
-    # bit-identical on real-shaped data), so blurring the still-unflipped,
-    # C-contiguous canvas first and flipping the result afterward gives the
-    # same output while avoiding cv2.medianBlur's ~10% slowdown when handed
-    # a flipped (negative-stride) view instead of a normal array. ---
+    # --- step 2: vertical flip, shared by the whole sac - drawn here but
+    # *applied* below, after step 3's median blur, since a symmetric
+    # kernel's median blur commutes exactly with a vertical flip (border
+    # replication included - verified bit-identical on real-shaped data):
+    # blurring the still-unflipped, C-contiguous canvas and flipping the
+    # result afterward gives the same output while avoiding cv2.medianBlur's
+    # ~10% slowdown on a flipped (negative-stride) view. ---
     flip = bool(geometry_rng.random() < 0.5)
     meta["flip"] = flip
 
-    # --- step 3: median blur ---
+    # --- step 5, drawn early (before step 3's blur, still logically step 5
+    # in the canonical order - only *when* the RNG is consumed moved, not
+    # what the pipeline does): crop positions only depend on the (blur- and
+    # A4-invariant) candidate table, never on pixel values, so sampling them
+    # now - instead of after blur/A4 - costs nothing and tells step 3 below
+    # exactly which regions of the canvas the sac will ever actually read
+    # from. Positions are in the canvas's own (pre-flip) coordinates here;
+    # remapped for flip right before the crop loop, same as before. ---
     t0 = time.perf_counter()
-    canvas = cv2.medianBlur(canvas, MEDIAN_BLUR_K)
-    timings["median_blur_s"] = time.perf_counter() - t0
+    crop_specs_unflipped = []  # (size, y, x), pre-flip coordinates
+    for size in CROP_SIZES:
+        candidates = load_candidates(dataset_dir, stem, size)
+        positions = sample_positions(candidates, N_CROPS_PER_SIZE, geometry_rng)
+        crop_specs_unflipped.extend((size, y, x) for y, x in positions)
+    timings["sample_positions_s"] = time.perf_counter() - t0
+
+    # --- step 4's params, drawn early for the same reason as positions
+    # above: A4 (if drawn) needs to be fused with step 3's blur below (both
+    # are purely local ops - see _blur_near_crops()'s docstring - and A4
+    # itself also commutes exactly with the later flip, verified
+    # bit-identical, same as median blur), so its params must be known
+    # before that fused call runs. ---
+    a4_params = None
+    if "A4" in condition:
+        a4_params = fixed_a4_params if fixed_a4_params is not None else a4_directional_blur.draw_params(rng)
+        meta["A4"] = a4_params
+
+    # --- steps 3-4 fused: median blur, then A4 if drawn, both restricted to
+    # each crop's own padded neighbourhood - nothing downstream ever reads a
+    # canvas pixel outside the 16 crops' own footprints, so this is exact,
+    # not an approximation, and skips processing the ~85%+ of the canvas no
+    # crop ever touches (median blur unconditionally; A4 too, when drawn -
+    # previously A4 forced a full-canvas pass for both steps). ---
+    canvas, t_median, t_a4 = _blur_near_crops(canvas, crop_specs_unflipped, MEDIAN_BLUR_K, a4_params)
+    timings["median_blur_s"] = t_median
+    if a4_params is not None:
+        timings["A4_s"] = t_a4
 
     t0 = time.perf_counter()
     if flip:
@@ -125,29 +215,14 @@ def build_bag(
         mask = np.flipud(mask)
     timings["flip_s"] = time.perf_counter() - t0
 
-    # --- step 4: A4, image level ---
-    if "A4" in condition:
-        t0 = time.perf_counter()
-        params = fixed_a4_params if fixed_a4_params is not None else a4_directional_blur.draw_params(rng)
-        canvas = a4_directional_blur.apply(canvas, **params)
-        meta["A4"] = params
-        timings["A4_s"] = time.perf_counter() - t0
-
-    # --- step 5: sample positions (from the *un-flipped* candidate table:
-    # flipping y -> H-P-y is exact for a permutation, so we flip the table's
-    # own coordinates instead of re-deriving candidates for the flipped
-    # canvas) ---
-    t0 = time.perf_counter()
-    crop_specs = []  # (size, y, x)
-    for size in CROP_SIZES:
-        candidates = load_candidates(dataset_dir, stem, size)
-        positions = sample_positions(candidates, N_CROPS_PER_SIZE, geometry_rng)
-        if flip:
-            canvas_h = canvas.shape[0]
-            positions = [(canvas_h - size - y, x) for (y, x) in positions]
-        crop_specs.extend((size, y, x) for y, x in positions)
+    # remap for flip (y -> H-P-y is exact for a vertical permutation, so the
+    # un-flipped positions above are transformed instead of re-derived)
+    canvas_h = canvas.shape[0]
+    if flip:
+        crop_specs = [(size, canvas_h - size - y, x) for size, y, x in crop_specs_unflipped]
+    else:
+        crop_specs = crop_specs_unflipped
     meta["positions"] = crop_specs
-    timings["sample_positions_s"] = time.perf_counter() - t0
 
     # --- steps 6-8: crop, resize, A3, A5 ---
     crops = []
@@ -245,7 +320,7 @@ def read_working_image(
         if cached is not None:
             labels, grayscale = cached
             if fixed_a6_category is not None:
-                canvas, a6_meta = a6_colour_removal.apply_from_cache(canvas, labels, grayscale, fixed_a6_category)
+                canvas, _mask, a6_meta = a6_colour_removal.apply_from_cache(canvas, labels, grayscale, fixed_a6_category)
                 meta["A6_category"] = fixed_a6_category
                 meta["A6"] = a6_meta
             else:

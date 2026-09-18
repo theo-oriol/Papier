@@ -64,18 +64,10 @@ def _radial_average(magnitude: np.ndarray, radial_idx: np.ndarray, max_r: int) -
     return sums / counts
 
 
-def measure_alpha(crop_uint8: np.ndarray, band=(BAND_LOW, BAND_HIGH)) -> float:
-    """Fit the current radial-average slope of the G channel in the given
-    band by ordinary least squares in log-log space. Used for logging/
-    diagnostics (figures, benchmark script), not by apply() itself."""
-    g = crop_uint8[..., 1].astype(np.float64)
-    size = g.shape[0]
-    spectrum = np.abs(np.fft.fftshift(np.fft.fft2(g)))
-    radial_idx = _radial_index(size)
-    max_r = int(radial_idx.max())
-    profile = _radial_average(spectrum, radial_idx, max_r)
-
-    radii = np.arange(max_r + 1)
+def _alpha_from_profile(profile: np.ndarray, radii: np.ndarray, band=(BAND_LOW, BAND_HIGH)) -> float:
+    """The OLS log-log slope fit, factored out of measure_alpha() so apply()
+    can reuse a profile it already computed instead of recomputing it via a
+    second, redundant fft2 of the same data (see apply()'s docstring)."""
     in_band = (radii >= band[0]) & (radii <= band[1]) & (profile > 0)
     log_r = np.log(radii[in_band])
     log_a = np.log(profile[in_band])
@@ -83,19 +75,44 @@ def measure_alpha(crop_uint8: np.ndarray, band=(BAND_LOW, BAND_HIGH)) -> float:
     return float(-slope)
 
 
+def measure_alpha(crop_uint8: np.ndarray, band=(BAND_LOW, BAND_HIGH)) -> float:
+    """Fit the current radial-average slope of the G channel in the given
+    band by ordinary least squares in log-log space. Used for logging/
+    diagnostics (figures, benchmark script) and by apply() for alpha_after
+    (the *output*'s spectrum, necessarily new - nothing to reuse there)."""
+    g = crop_uint8[..., 1].astype(np.float64)
+    size = g.shape[0]
+    spectrum = np.abs(np.fft.fftshift(np.fft.fft2(g)))
+    radial_idx = _radial_index(size)
+    max_r = int(radial_idx.max())
+    profile = _radial_average(spectrum, radial_idx, max_r)
+    radii = np.arange(max_r + 1, dtype=np.float64)
+    return _alpha_from_profile(profile, radii, band)
+
+
 def apply(crop_uint8: np.ndarray, target_alpha: float) -> Tuple[np.ndarray, Dict[str, float]]:
     size = crop_uint8.shape[0]
     radial_idx = _radial_index(size)
     max_r = int(radial_idx.max())
+    radii = np.arange(max_r + 1).astype(np.float64)
 
     g = crop_uint8[..., 1].astype(np.float64)
     g_fft = np.fft.fftshift(np.fft.fft2(g))
     magnitude = np.abs(g_fft)
     profile = _radial_average(magnitude, radial_idx, max_r)
+    # alpha_before from the profile just computed above - measure_alpha()
+    # would redo the exact same fft2/fftshift/abs/radial_average of this
+    # same G channel just to get back to the same profile; a batched
+    # version of this across all 16 crops was tried and measured *slower*
+    # than looping (numpy's fft2 with a non-default `axes` batch dimension
+    # is consistently slower than N individual calls for this shape, even
+    # with scipy.fft's multithreaded backend) - this redundant-computation
+    # removal is the one FFT-count reduction here that actually measured
+    # faster.
+    alpha_before = _alpha_from_profile(profile, radii)
 
     anchor_r = int(round(ANCHOR_RADIUS))
     anchor_amplitude = profile[anchor_r] if profile[anchor_r] > 0 else 1.0
-    radii = np.arange(max_r + 1).astype(np.float64)
     with np.errstate(divide="ignore"):
         target_profile = anchor_amplitude * np.power(radii / anchor_r, -target_alpha)
     target_profile[0] = profile[0]  # never touch the DC term (mean brightness)
@@ -114,7 +131,7 @@ def apply(crop_uint8: np.ndarray, target_alpha: float) -> Tuple[np.ndarray, Dict
     out_uint8 = np.clip(out, 0, 255).astype(np.uint8)
     meta = {
         "target_alpha": target_alpha,
-        "alpha_before": measure_alpha(crop_uint8),
+        "alpha_before": alpha_before,
         "alpha_after": measure_alpha(out_uint8),
     }
     return out_uint8, meta
