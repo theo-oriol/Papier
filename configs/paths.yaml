@@ -5,35 +5,38 @@
 
 # Root of the NPY dataset (one *.rgb.zst + *.cand_128.zst + *.cand_224.zst per
 # specimen, vue "Back" uniquement — cf. protocole §2).
-# Reorganised on disk on 2026-09-14: the dataset now lives under a parent
-# folder holding all three views (Back/Belly/Side — see
-# scripts/build_grayscale_dataset.py, which uses that layout directly). The
-# old flat /media/.../Datasets/NEW_Segmented-Aves-Back-NPY no longer exists.
-dataset_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_no_ablation/NEW_Segmented-Aves-Back-NPY
+# Moved again on 2026-09-23: the whole Datasets/ tree (source + every offline
+# cache below) was rsync'd from the LaCie exFAT-over-USB drive to this
+# SATA-attached ext4 drive (better suited to a 41,901-file flat directory -
+# exFAT's linear directory table was the source of most of this project's
+# slow `ls`/`stat`/`du` calls; ext4's hashed B-tree index handles this
+# layout far better) - verified file-count-identical to the LaCie copy
+# before switching this file over. LaCie's copies are untouched, still
+# there as a backup, just no longer what these paths point to.
+dataset_dir: /media/oriol@newcefe.newage.fr/b6c7b14d-751d-43be-970b-03e70e535a4f/Datasets/Familly_split_no_ablation/NEW_Segmented-Aves-Back-NPY
 
-# Reorganised again on 2026-09-16: each offline cache now lives in its own
-# top-level folder, sibling to Familly_split_no_ablation (which holds only
-# the raw, unmodified dataset - Back/Belly/Side) - not nested inside it as
-# sibling "-A1"/"-A2"/... suffixed folders like before. Each of these paths
-# names the Back-view leaf directly (protocole §2, "vue Back uniquement" -
-# the one the training/eval pipeline actually reads); the build scripts
-# derive the Belly/Side siblings from this same path's parent (see each
-# script's own root-derivation check) - moving one of these paths to a
-# different view or a differently-laid-out root will make that check fail
-# loudly rather than silently building in the wrong place.
+# Each offline cache lives in its own top-level folder, sibling to
+# Familly_split_no_ablation (which holds only the raw, unmodified dataset -
+# Back/Belly/Side). Each of these paths names the Back-view leaf directly
+# (protocole §2, "vue Back uniquement" - the one the training/eval pipeline
+# actually reads); the build scripts derive the Belly/Side siblings from
+# this same path's parent (see each script's own root-derivation check) -
+# moving one of these paths to a different view or a differently-laid-out
+# root will make that check fail loudly rather than silently building in
+# the wrong place.
 
 # Where the offline-standardized A2 cache lives once scripts/build_a2_cache.py
 # has been run (protocole §2 : A2 "n'est pas calculée du tout, elle est lue
 # dans un jeu distinct, standardisé hors ligne"). Does not exist until built.
-dataset_a2_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A2/NEW_Segmented-Aves-Back-NPY
+dataset_a2_dir: /media/oriol@newcefe.newage.fr/b6c7b14d-751d-43be-970b-03e70e535a4f/Datasets/Familly_split_A2/NEW_Segmented-Aves-Back-NPY
 
 # A1 and A7 are deterministic given the specimen (no drawn parameter), so —
 # same reasoning as A2 — they're precomputed once offline instead of being
 # recomputed by every sac that draws them online (classify_delhey_rgb-adjacent
 # CIELAB math was the dominant per-epoch cost; see README "Plan de reduction
 # du temps d'ablation"). Built by scripts/build_a1_cache.py / build_a7_cache.py.
-dataset_a1_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A1/NEW_Segmented-Aves-Back-NPY
-dataset_a7_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A7/NEW_Segmented-Aves-Back-NPY
+dataset_a1_dir: /media/oriol@newcefe.newage.fr/b6c7b14d-751d-43be-970b-03e70e535a4f/Datasets/Familly_split_A1/NEW_Segmented-Aves-Back-NPY
+dataset_a7_dir: /media/oriol@newcefe.newage.fr/b6c7b14d-751d-43be-970b-03e70e535a4f/Datasets/Familly_split_A7/NEW_Segmented-Aves-Back-NPY
 
 # A6's per-pixel Delhey colour classification is also deterministic given the
 # specimen (only the *category to remove* is drawn per sac, not the
@@ -42,7 +45,7 @@ dataset_a7_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A7/N
 # needs it. Built by scripts/build_a6_classification_cache.py; does not
 # exist until built. One int8 label map per specimen (see
 # src/ablations/a6_colour_removal.py build_classification()).
-dataset_a6_classification_dir: /media/oriol@newcefe.newage.fr/LaCie/Datasets/Familly_split_A6_classification/NEW_Segmented-Aves-Back-NPY
+dataset_a6_classification_dir: /media/oriol@newcefe.newage.fr/b6c7b14d-751d-43be-970b-03e70e535a4f/Datasets/Familly_split_A6_classification/NEW_Segmented-Aves-Back-NPY
 
 # Fold tables and crosswalk (protocole §7). Row/family counts were checked
 # against the numbers printed in the PDF (37890+54600+30471 images,

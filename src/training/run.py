@@ -19,6 +19,7 @@ import torch
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from ..datasets import folds
 from ..datasets.bag_dataset import BagDataset
@@ -110,7 +111,8 @@ class Trainer:
         n_micro_batches = 0
 
         self.optimizer.zero_grad(set_to_none=True)
-        for step, batch in enumerate(self.loader):
+        progress = tqdm(self.loader, desc=f"epoch {epoch}", unit="sac", leave=False)
+        for step, batch in enumerate(progress):
             crops = batch["crops"].to(self.device, non_blocking=True)
             habitat = batch["habitat"].to(self.device, non_blocking=True)
             support = batch["support"].to(self.device, non_blocking=True)
@@ -132,6 +134,7 @@ class Trainer:
             total_kl += parts["kl"]
             total_bce += parts["bce"]
             n_micro_batches += 1
+            progress.set_postfix(loss=total_loss / n_micro_batches, refresh=False)
 
         return {
             "train_loss": total_loss / n_micro_batches,

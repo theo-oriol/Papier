@@ -67,8 +67,22 @@ def _radial_average(magnitude: np.ndarray, radial_idx: np.ndarray, max_r: int) -
 def _alpha_from_profile(profile: np.ndarray, radii: np.ndarray, band=(BAND_LOW, BAND_HIGH)) -> float:
     """The OLS log-log slope fit, factored out of measure_alpha() so apply()
     can reuse a profile it already computed instead of recomputing it via a
-    second, redundant fft2 of the same data (see apply()'s docstring)."""
+    second, redundant fft2 of the same data (see apply()'s docstring).
+
+    Returns NaN, not a crash, when `profile` has no positive energy
+    anywhere in the band - a real case, not just a hypothetical: a crop
+    that lands entirely on background (or any other spatially-uniform
+    region) has a spectrum that's zero everywhere off DC, and a regraded
+    *output* can end up uniform too, if the gain needed to hit a jittered
+    target_alpha is extreme enough to clip most of the crop to a flat 0 or
+    255 - both leave nothing in-band to fit a slope to. This crashed a real
+    training run (np.polyfit on an empty vector, TypeError) before this
+    guard existed. Safe to return NaN rather than some placeholder number:
+    alpha_before/alpha_after are diagnostic metadata only, never fed back
+    into the gain computation or the output pixels themselves."""
     in_band = (radii >= band[0]) & (radii <= band[1]) & (profile > 0)
+    if not np.any(in_band):
+        return float("nan")
     log_r = np.log(radii[in_band])
     log_a = np.log(profile[in_band])
     slope, _intercept = np.polyfit(log_r, log_a, 1)

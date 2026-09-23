@@ -7,18 +7,31 @@ weight_decay: 0.01
 learning_rate: 1.0e-4
 scheduler: cosine_annealing    # over the full epochs_max horizon, even though early stop
                                 # usually interrupts it before it completes
-batch_size: 64                 # sacs; 64 x 16 crops = 1024 crops/step (protocole §1)
+batch_size: 128                # sacs; doubled from the protocol's 64 on 2026-09-23 -
+                                # 128 x 16 crops = 2048 crops/step
 n_crops_per_size: 8             # -> 16 crops per sac (8x128 + 8x224)
-num_workers: 8
+num_workers: 8   # lowered from 32 back to 8 on 2026-09-23: 48 idle cores were
+                   # never the constraint - RAM was. Measured ~300-470MB RSS per
+                   # worker (scratchpad bench_worker_ram.py), so 32 workers ate
+                   # ~10-11GB on a 32GB machine, which is what drove the heavy
+                   # swapping (6.4GB swap used) that froze the machine. Measured
+                   # dataloader-only throughput at low worker counts (scratchpad
+                   # bench_dataloader_throughput.py): 4 workers already sustain
+                   # 9.93 sacs/s, 8 workers 12.56 sacs/s - both comfortably above
+                   # the vits16 model's ~8.8 sacs/s appetite, so 8 keeps a safety
+                   # margin without repeating the RAM overload.
 
-# batch_size=64 is the protocol's number, not this machine's: a single DINOv3-L
-# forward+backward on the 16 crops of just ONE sac already uses ~5.7GB on the
-# 16GB GPU here (measured with bf16 autocast — see README "Memoire GPU").
-# micro_batch_size is how many sacs actually go through the model at once;
-# the Trainer accumulates gradients over batch_size / micro_batch_size steps
-# before every optimizer.step(), so the *effective* batch is still 64 sacs.
-# Raise this if you run on a bigger GPU.
-micro_batch_size: 1
+# micro_batch_size is the actual batch size given to the model/DataLoader per
+# pass (DataLoader's own batch_size= IS cfg["micro_batch_size"] - see run.py) -
+# batch_size above never touches the GPU, it's just the gradient-accumulation
+# target. Re-measured on 2026-09-23 after switching to dinov3_vits16 (scratchpad
+# bench_micro_batch.py, real BagModel+CombinedLoss+Adam, torch env): unlike
+# vitl16 (flat sacs/s regardless of batch - already fully GPU-compute-saturated
+# at just 1 sac/forward), vits16 gets real throughput gains from batching,
+# plateauing ~8.7-8.9 sacs/s from micro_batch_size=8 upward, OOM at 20. Set to
+# 16 (must evenly divide batch_size): near-peak throughput, 12GB/16GB used,
+# comfortable margin below the OOM point for real-data variance.
+micro_batch_size: 16
 use_amp: true
 
 # Adaptive KL/BCE loss weighting (src/training/loss_balancing.py) - a
