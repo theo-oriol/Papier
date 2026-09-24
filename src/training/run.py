@@ -98,11 +98,22 @@ class Trainer:
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=cfg["epochs_max"])
         self.use_amp = cfg["use_amp"] and self.device.type == "cuda"
 
+        # Early-stop bookkeeping lives on self, not as fit()-local variables,
+        # so a resumed run can restore it instead of re-deciding "stalled?"
+        # from a blank slate (see _load_checkpoint).
+        self.start_epoch = 1
+        self.recent_losses: deque = deque(maxlen=cfg["early_stop_smoothing"])
+        self.best_smoothed = float("inf")
+        self.epochs_without_improvement = 0
+
         self.metrics_path = self.run_dir / "metrics.csv"
-        with open(self.metrics_path, "w", newline="") as f:
-            csv.writer(f).writerow(
-                ["epoch", "train_loss", "train_loss_smoothed", "kl", "bce", "w_kl", "w_bce", "lr", "seconds"]
-            )
+        last_ckpt = self.run_dir / "checkpoints" / "last.pt"
+        resumed = last_ckpt.exists() and self._load_checkpoint(last_ckpt)
+        if not resumed:
+            with open(self.metrics_path, "w", newline="") as f:
+                csv.writer(f).writerow(
+                    ["epoch", "train_loss", "train_loss_smoothed", "kl", "bce", "w_kl", "w_bce", "lr", "seconds"]
+                )
 
     def _run_epoch(self, epoch: int) -> Dict[str, float]:
         self.dataset.set_epoch(epoch)
@@ -144,12 +155,8 @@ class Trainer:
 
     def fit(self) -> None:
         patience = self.cfg["early_stop_patience"]
-        smoothing = self.cfg["early_stop_smoothing"]
-        recent_losses: deque = deque(maxlen=smoothing)
-        best_smoothed = float("inf")
-        epochs_without_improvement = 0
 
-        for epoch in range(1, self.cfg["epochs_max"] + 1):
+        for epoch in range(self.start_epoch, self.cfg["epochs_max"] + 1):
             t0 = time.time()
             # loss_fn.lambda_kl/lambda_bce are whatever the previous
             # iteration's balancer update left them at (0.5/0.5 to start) -
@@ -160,8 +167,8 @@ class Trainer:
             self.scheduler.step()
             elapsed = time.time() - t0
 
-            recent_losses.append(epoch_stats["train_loss"])
-            smoothed = sum(recent_losses) / len(recent_losses)
+            self.recent_losses.append(epoch_stats["train_loss"])
+            smoothed = sum(self.recent_losses) / len(self.recent_losses)
 
             with open(self.metrics_path, "a", newline="") as f:
                 csv.writer(f).writerow(
@@ -181,31 +188,71 @@ class Trainer:
             next_weights = self.loss_balancer.update({"kl": epoch_stats["kl"], "bce": epoch_stats["bce"]})
             self.loss_fn.set_weights(next_weights["kl"], next_weights["bce"])
 
-            self._save_checkpoint("last")
-            if smoothed < best_smoothed:
-                best_smoothed = smoothed
-                epochs_without_improvement = 0
-                self._save_checkpoint("best")
+            self._save_checkpoint("last", epoch)
+            # best.pt tracks the best *smoothed training loss* only -
+            # validation is never consulted during training (see optim.yaml's
+            # early_stop_patience comment) - deliberately, not an oversight.
+            if smoothed < self.best_smoothed:
+                self.best_smoothed = smoothed
+                self.epochs_without_improvement = 0
+                self._save_checkpoint("best", epoch)
             else:
-                epochs_without_improvement += 1
+                self.epochs_without_improvement += 1
 
             print(
                 f"[{self.cfg['run_name']}] epoch {epoch:3d}  "
                 f"loss {epoch_stats['train_loss']:.4f}  smoothed {smoothed:.4f}  "
-                f"({elapsed:.1f}s, {epochs_without_improvement}/{patience} without improvement)"
+                f"({elapsed:.1f}s, {self.epochs_without_improvement}/{patience} without improvement)"
             )
 
-            if epochs_without_improvement >= patience:
+            if self.epochs_without_improvement >= patience:
                 print(f"[{self.cfg['run_name']}] early stop at epoch {epoch}")
                 break
 
-    def _save_checkpoint(self, name: str) -> None:
+    def _save_checkpoint(self, name: str, epoch: int) -> None:
         # backbone.state_dict() on a peft-wrapped model saves the (frozen)
         # base weights plus the LoRA deltas together — evaluate.py rebuilds
         # the same peft-wrapped architecture and loads this back as-is.
+        # Everything past "heads" exists only so last.pt can be resumed from
+        # (optimizer/scheduler momentum, early-stop counters, loss-balancer
+        # EMA history) - evaluate.py only ever reads backbone/pool/heads.
         state = {
+            "epoch": epoch,
             "backbone": self.model.backbone.state_dict(),
             "pool": self.model.pool.state_dict(),
             "heads": self.model.heads.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "loss_balancer": self.loss_balancer.state_dict(),
+            "w_kl": self.loss_fn.lambda_kl,
+            "w_bce": self.loss_fn.lambda_bce,
+            "recent_losses": list(self.recent_losses),
+            "best_smoothed": self.best_smoothed,
+            "epochs_without_improvement": self.epochs_without_improvement,
         }
         torch.save(state, self.run_dir / "checkpoints" / f"{name}.pt")
+
+    def _load_checkpoint(self, path: Path) -> bool:
+        """Returns True on a successful resume, False if path was unusable
+        (corrupted/incompatible) - in which case the caller starts fresh
+        rather than crash, the same lesson as today's A2 cache corruption:
+        a bad file on disk shouldn't be worse than a missing one."""
+        try:
+            state = torch.load(path, map_location=self.device, weights_only=False)
+            self.model.backbone.load_state_dict(state["backbone"])
+            self.model.pool.load_state_dict(state["pool"])
+            self.model.heads.load_state_dict(state["heads"])
+            self.optimizer.load_state_dict(state["optimizer"])
+            self.scheduler.load_state_dict(state["scheduler"])
+            self.loss_balancer.load_state_dict(state["loss_balancer"])
+            self.loss_fn.set_weights(state["w_kl"], state["w_bce"])
+            self.recent_losses = deque(state["recent_losses"], maxlen=self.cfg["early_stop_smoothing"])
+            self.best_smoothed = state["best_smoothed"]
+            self.epochs_without_improvement = state["epochs_without_improvement"]
+            self.start_epoch = state["epoch"] + 1
+        except Exception as e:
+            print(f"[{self.cfg['run_name']}] WARNING: could not resume from {path} ({e!r}) - starting fresh")
+            return False
+
+        print(f"[{self.cfg['run_name']}] resumed from {path} - continuing at epoch {self.start_epoch}")
+        return True

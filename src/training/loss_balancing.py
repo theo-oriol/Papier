@@ -67,6 +67,20 @@ class AdaptiveLossBalancer:
         # call as new values push old ones out.
         self._history: Dict[str, Deque[float]] = {name: deque(maxlen=lag_epochs + 1) for name in names}
 
+    def state_dict(self) -> Dict[str, object]:
+        """For Trainer checkpointing - a resumed run needs this to keep
+        computing the *same* r_i(t) it would have without the interruption,
+        not restart the EMA/lag history from scratch."""
+        return {
+            "ema": dict(self._ema),
+            "history": {name: list(hist) for name, hist in self._history.items()},
+        }
+
+    def load_state_dict(self, state: Dict[str, object]) -> None:
+        self._ema = dict(state["ema"])
+        for name, values in state["history"].items():
+            self._history[name] = deque(values, maxlen=self.lag_epochs + 1)
+
     def update(self, raw_losses: Dict[str, float]) -> Dict[str, float]:
         """Call once per epoch with that epoch's mean raw loss per term.
         Returns the weights to use for the *next* epoch."""
