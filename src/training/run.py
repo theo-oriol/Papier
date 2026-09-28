@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from ..datasets import folds
 from ..datasets.bag_dataset import BagDataset
+from ..datasets.eval_dataset import EvalDataset
 from ..model.bagmodel import BagModel
 from ..model.losses import CombinedLoss
 from ..configio import save_resolved_config
@@ -55,8 +56,6 @@ class Trainer:
         class_weights = torch.tensor(folds.bce_class_weights(train_df), dtype=torch.float32)
         manifest["train_size"] = len(train_df)
         manifest["bce_class_weights"] = class_weights.tolist()
-        # Save le manifest
-        write_manifest(manifest, self.run_dir / "manifest.json")
 
         # Crée les crop et applique les ablations. C'est le cerveau du dataloader
         self.dataset = BagDataset(
@@ -83,6 +82,32 @@ class Trainer:
             pin_memory=True,
         )
 
+        # Validation loss, tracked purely for observation (see fit()'s
+        # docstring note) - NOT currently used for early-stop/best-checkpoint
+        # selection, which still watches the adaptively-reweighted train loss.
+        # EvalDataset builds the *entire* §7 grid (every ablation condition x
+        # every image); we only want the "reference" (no-ablation) condition
+        # once per validation image, so its item list is filtered down to
+        # exactly that right after construction - len(valid_df) items, not
+        # len(valid_df) x len(all_conditions).
+        valid_df = folds.load_fold(cfg, cfg["fold"], "valid")
+        manifest["valid_size"] = len(valid_df)
+        self.valid_dataset = EvalDataset(valid_df, cfg)
+        self.valid_dataset._items = [
+            item for item in self.valid_dataset._items if item[1].name == "reference"
+        ]
+        self.valid_loader = DataLoader(
+            self.valid_dataset,
+            batch_size=cfg["micro_batch_size"],
+            shuffle=False,
+            num_workers=cfg["num_workers"],
+            worker_init_fn=worker_init_fn,
+            pin_memory=True,
+        )
+
+        # Save le manifest (train + valid sizes both known now)
+        write_manifest(manifest, self.run_dir / "manifest.json")
+
         self.model = BagModel(cfg).to(self.device)
         self.loss_fn = CombinedLoss(class_weights).to(self.device)
         self.loss_balancer = AdaptiveLossBalancer(
@@ -101,9 +126,21 @@ class Trainer:
         # Early-stop bookkeeping lives on self, not as fit()-local variables,
         # so a resumed run can restore it instead of re-deciding "stalled?"
         # from a blank slate (see _load_checkpoint).
+        # recent_losses/train_loss_smoothed (adaptively-reweighted) is kept
+        # only for display - early-stop and best.pt selection key off
+        # recent_fixed_losses instead: kl/bce combined with a FIXED 0.5/0.5,
+        # immune to the balancer's own weight shifts (see fit()'s note).
+        # Deliberately NOT validation loss either, even though that's also
+        # balancer-immune: this fold's validation split is the same one
+        # run_eval.py later scores the §7 grid against, so letting it drive
+        # checkpoint selection would bias that evaluation - the model would
+        # be picked to do well on the exact data its headline numbers get
+        # computed from. val_loss is logged for observation only.
         self.start_epoch = 1
         self.recent_losses: deque = deque(maxlen=cfg["early_stop_smoothing"])
-        self.best_smoothed = float("inf")
+        self.recent_val_losses: deque = deque(maxlen=cfg["early_stop_smoothing"])
+        self.recent_fixed_losses: deque = deque(maxlen=cfg["early_stop_smoothing"])
+        self.best_fixed_smoothed = float("inf")
         self.epochs_without_improvement = 0
 
         self.metrics_path = self.run_dir / "metrics.csv"
@@ -112,7 +149,11 @@ class Trainer:
         if not resumed:
             with open(self.metrics_path, "w", newline="") as f:
                 csv.writer(f).writerow(
-                    ["epoch", "train_loss", "train_loss_smoothed", "kl", "bce", "w_kl", "w_bce", "lr", "seconds"]
+                    [
+                        "epoch", "train_loss", "train_loss_smoothed", "kl", "bce", "w_kl", "w_bce",
+                        "val_loss", "val_loss_smoothed", "val_kl", "val_bce",
+                        "early_stop_smoothed", "lr", "seconds",
+                    ]
                 )
 
     def _run_epoch(self, epoch: int) -> Dict[str, float]:
@@ -153,6 +194,41 @@ class Trainer:
             "bce": total_bce / n_micro_batches,
         }
 
+    def _run_validation(self, epoch: int) -> Dict[str, float]:
+        """One forward-only pass over the fold's held-out "reference"
+        (no-ablation) images - the same images/crops every epoch (EvalDataset
+        seeds geometry from the stem alone), so any change in val_loss across
+        epochs reflects the model, not crop-sampling noise.
+
+        val_loss combines val_kl/val_bce with a FIXED 0.5/0.5, deliberately
+        not self.loss_fn's current (adaptively-reweighted) lambda_kl/lambda_bce
+        - the whole point of tracking this is a number that's comparable
+        epoch-to-epoch and isn't itself subject to the reweighting-artifact
+        jumps documented in loss_balancing.py. Not yet used for early-stop or
+        best-checkpoint selection (see fit()) - logged for observation only.
+        """
+        self.model.eval()
+        total_kl = total_bce = 0.0
+        n_micro_batches = 0
+        with torch.no_grad():
+            progress = tqdm(self.valid_loader, desc=f"epoch {epoch} (valid)", unit="sac", leave=False)
+            for batch in progress:
+                crops = batch["crops"].to(self.device, non_blocking=True)
+                habitat = batch["habitat"].to(self.device, non_blocking=True)
+                support = (habitat > 0).float()
+
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
+                    cls_logits, reg_logits, _attention = self.model(crops)
+                    _combined, parts = self.loss_fn(cls_logits, reg_logits, support, habitat)
+
+                total_kl += parts["kl"]
+                total_bce += parts["bce"]
+                n_micro_batches += 1
+
+        val_kl = total_kl / n_micro_batches
+        val_bce = total_bce / n_micro_batches
+        return {"val_kl": val_kl, "val_bce": val_bce, "val_loss": 0.5 * val_kl + 0.5 * val_bce}
+
     def fit(self) -> None:
         patience = self.cfg["early_stop_patience"]
 
@@ -164,11 +240,20 @@ class Trainer:
             # updated afterwards for the next one.
             w_kl, w_bce = self.loss_fn.lambda_kl, self.loss_fn.lambda_bce
             epoch_stats = self._run_epoch(epoch)
+            val_stats = self._run_validation(epoch)
             self.scheduler.step()
             elapsed = time.time() - t0
 
             self.recent_losses.append(epoch_stats["train_loss"])
             smoothed = sum(self.recent_losses) / len(self.recent_losses)
+            self.recent_val_losses.append(val_stats["val_loss"])
+            val_smoothed = sum(self.recent_val_losses) / len(self.recent_val_losses)
+            # the fixed-weight quantity that actually drives early-stop/best.pt
+            # (see __init__'s note) - computed from the same kl/bce this epoch
+            # already produced, no extra pass needed.
+            fixed_loss = 0.5 * epoch_stats["kl"] + 0.5 * epoch_stats["bce"]
+            self.recent_fixed_losses.append(fixed_loss)
+            fixed_smoothed = sum(self.recent_fixed_losses) / len(self.recent_fixed_losses)
 
             with open(self.metrics_path, "a", newline="") as f:
                 csv.writer(f).writerow(
@@ -180,6 +265,11 @@ class Trainer:
                         epoch_stats["bce"],
                         w_kl,
                         w_bce,
+                        val_stats["val_loss"],
+                        val_smoothed,
+                        val_stats["val_kl"],
+                        val_stats["val_bce"],
+                        fixed_smoothed,
                         self.optimizer.param_groups[0]["lr"],
                         elapsed,
                     ]
@@ -188,20 +278,31 @@ class Trainer:
             next_weights = self.loss_balancer.update({"kl": epoch_stats["kl"], "bce": epoch_stats["bce"]})
             self.loss_fn.set_weights(next_weights["kl"], next_weights["bce"])
 
-            self._save_checkpoint("last", epoch)
-            # best.pt tracks the best *smoothed training loss* only -
-            # validation is never consulted during training (see optim.yaml's
-            # early_stop_patience comment) - deliberately, not an oversight.
-            if smoothed < self.best_smoothed:
-                self.best_smoothed = smoothed
+            # best.pt / early-stop key off fixed_smoothed (see __init__'s
+            # note): never the adaptively-reweighted train_loss_smoothed
+            # (shown to falsely register "stalled" purely from a balancer
+            # weight shift - fold1's premature stop at epoch 16), and
+            # deliberately never val_loss either, to keep the validation
+            # split untouched by model selection for run_eval.py later.
+            # This update happens *before* saving "last" - last.pt must
+            # reflect this epoch's own best_fixed_smoothed/
+            # epochs_without_improvement, or resuming from it restores stale
+            # counters that are missing this epoch's own verdict.
+            is_best = fixed_smoothed < self.best_fixed_smoothed
+            if is_best:
+                self.best_fixed_smoothed = fixed_smoothed
                 self.epochs_without_improvement = 0
-                self._save_checkpoint("best", epoch)
             else:
                 self.epochs_without_improvement += 1
+
+            self._save_checkpoint("last", epoch)
+            if is_best:
+                self._save_checkpoint("best", epoch)
 
             print(
                 f"[{self.cfg['run_name']}] epoch {epoch:3d}  "
                 f"loss {epoch_stats['train_loss']:.4f}  smoothed {smoothed:.4f}  "
+                f"val {val_stats['val_loss']:.4f}  early_stop_smoothed {fixed_smoothed:.4f}  "
                 f"({elapsed:.1f}s, {self.epochs_without_improvement}/{patience} without improvement)"
             )
 
@@ -227,7 +328,9 @@ class Trainer:
             "w_kl": self.loss_fn.lambda_kl,
             "w_bce": self.loss_fn.lambda_bce,
             "recent_losses": list(self.recent_losses),
-            "best_smoothed": self.best_smoothed,
+            "recent_val_losses": list(self.recent_val_losses),
+            "recent_fixed_losses": list(self.recent_fixed_losses),
+            "best_fixed_smoothed": self.best_fixed_smoothed,
             "epochs_without_improvement": self.epochs_without_improvement,
         }
         torch.save(state, self.run_dir / "checkpoints" / f"{name}.pt")
@@ -247,7 +350,9 @@ class Trainer:
             self.loss_balancer.load_state_dict(state["loss_balancer"])
             self.loss_fn.set_weights(state["w_kl"], state["w_bce"])
             self.recent_losses = deque(state["recent_losses"], maxlen=self.cfg["early_stop_smoothing"])
-            self.best_smoothed = state["best_smoothed"]
+            self.recent_val_losses = deque(state["recent_val_losses"], maxlen=self.cfg["early_stop_smoothing"])
+            self.recent_fixed_losses = deque(state["recent_fixed_losses"], maxlen=self.cfg["early_stop_smoothing"])
+            self.best_fixed_smoothed = state["best_fixed_smoothed"]
             self.epochs_without_improvement = state["epochs_without_improvement"]
             self.start_epoch = state["epoch"] + 1
         except Exception as e:

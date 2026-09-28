@@ -1,6 +1,8 @@
 # Optimisation hyperparameters, protocole §1 "Optimisation" table.
 epochs_max: 100
-early_stop_patience: 10       # on the *smoothed train loss*, no validation metric enters this
+early_stop_patience: 20       # raised from 10 on 2026-09-28. Now keys off a fixed 0.5/0.5
+                                # kl/bce combo, not train_loss_smoothed (see run.py's fit()) -
+                                # no validation metric enters this either.
 early_stop_smoothing: 5       # epochs averaged into the smoothed loss before comparing
 optimizer: adam
 weight_decay: 0.01
