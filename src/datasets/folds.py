@@ -1,12 +1,20 @@
 """Loading the fold tables and turning them into (image stem, habitat
-distribution) pairs restricted to the Back view (protocole §7).
+distribution) pairs, across all three views (protocole §7).
 
 The fold CSVs (train_fold_k.csv / valid_fold_k.csv) cover all three views
 (Back/Belly/Side) - 122,961 images total, matching the counts printed in
 the protocol PDF exactly (37890 + 54600 + 30471, 83 + 77 + 80 families).
-The NPY dataset used here only has the Back view, so every fold gets
-restricted to the images that actually have a cache entry on disk. That's
-also where the protocol's "40 987 images" for the Back view comes from.
+protocole v5 §7 itself restricts analysis to the Back view ("le jeu NPY
+n'en contient qu'une, la vue Back") - but that was a statement about what
+NPY data existed when it was written, not a methodological requirement:
+Belly/Side NPY caches (raw + every ablation) were built later in this
+project and are complete (see src/view_paths.py), so every view is used
+here - each specimen's Back/Belly/Side image becomes its own independent
+training/eval example carrying the same (species-level) habitat label.
+protocole §7 also confirms no train/valid overlap at the "oiseau"
+(individual bird) level for any fold, so a bird's three views are
+guaranteed to land in the same split - extending to all views can't leak
+a bird across train/valid the way it could if the split were per-image.
 """
 
 from __future__ import annotations
@@ -18,6 +26,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+from ..view_paths import VIEWS, VIEW_TEMPLATE, check_back_leaf_and_get_parent, view_of_name
 
 HABITAT_CODE_COLUMNS = ["1", "2", "3", "4", "8", "12", "14", "9_11", "5_13_15", "6_7"]
 N_HABITATS = len(HABITAT_CODE_COLUMNS)
@@ -45,20 +55,25 @@ def _stem(name_of_img: str) -> str:
 
 def load_fold(paths_cfg: dict, fold: int, split: str) -> pd.DataFrame:
     """split is 'train' or 'valid'. Returns a DataFrame with columns
-    ['stem', 'family'] plus one 'habitat' column holding a (10,) float array
-    that sums to 1 (the ground-truth habitat distribution)."""
+    ['stem', 'family', 'view'] plus one 'habitat' column holding a (10,)
+    float array that sums to 1 (the ground-truth habitat distribution) -
+    one row per (specimen, view), all three views included."""
     assert split in ("train", "valid")
     csv_path = Path(paths_cfg["fold_dir"]) / f"{split}_fold_{fold}.csv"
     df = pd.read_csv(csv_path)
 
-    # restrict to the Back view - the other two views have no NPY cache here
-    df = df[df["name_of_img"].str.contains("_Back_")].copy()
     # Stem c'est le nom du fichier sans extensions ou root
     df["stem"] = df["name_of_img"].map(_stem)
+    df["view"] = df["name_of_img"].map(view_of_name)
 
-    # Vérifie que les fichiers dans le csv sont dans le dossier
-    available = _available_stems(str(paths_cfg["dataset_dir"]))
-    df = df[df["stem"].isin(available)].reset_index(drop=True)
+    # Vérifie que les fichiers dans le csv sont dans le dossier - par vue,
+    # puisqu'un stem Belly n'existe que dans le dossier Belly.
+    source_root = check_back_leaf_and_get_parent(Path(paths_cfg["dataset_dir"]), "dataset_dir")
+    kept = []
+    for view in VIEWS:
+        available = _available_stems(str(source_root / VIEW_TEMPLATE.format(view=view)))
+        kept.append(df[(df["view"] == view) & df["stem"].isin(available)])
+    df = pd.concat(kept, ignore_index=True) if kept else df.iloc[0:0]
 
     # Normalise la distribution d'habitat
     y = df[HABITAT_CODE_COLUMNS].to_numpy(dtype=np.float64) / 100.0
@@ -67,7 +82,7 @@ def load_fold(paths_cfg: dict, fold: int, split: str) -> pd.DataFrame:
     y = y / row_sums
     df["habitat"] = list(y)
 
-    return df[["stem", "family", "habitat"]]
+    return df[["stem", "family", "habitat", "view"]]
 
 
 def class_frequencies(train_df: pd.DataFrame) -> np.ndarray:

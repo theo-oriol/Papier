@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from ..datasets import folds
 from ..datasets.eval_dataset import EvalDataset
@@ -27,7 +28,7 @@ from .a6_presence import load_manifest
 
 
 def load_checkpoint(model: BagModel, checkpoint_path: Path) -> None:
-    state = torch.load(checkpoint_path, map_location="cpu")
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model.backbone.load_state_dict(state["backbone"])
     model.pool.load_state_dict(state["pool"])
     model.heads.load_state_dict(state["heads"])
@@ -48,13 +49,20 @@ def collect_predictions(cfg: Dict[str, Any], checkpoint_path: Path, fold: int) -
               f"(run scripts/build_a6_presence_manifest.py to include them)")
 
     dataset = EvalDataset(valid_df, cfg, a6_manifest=a6_manifest)
-    loader = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg["num_workers"])
+    # cfg["batch_size"] (128) is the *gradient-accumulation* target from
+    # training (see optim.yaml) - never an actual GPU batch, since training
+    # only ever forwards micro_batch_size sacs at once. Using it directly
+    # here would try to forward batch_size x 16 crops in one call (2048
+    # crops for the current config) - vits16 was measured to OOM on this
+    # GPU at just 20 sacs (320 crops), so this must use micro_batch_size,
+    # the config key that actually controls per-forward GPU load.
+    loader = DataLoader(dataset, batch_size=cfg["micro_batch_size"], shuffle=False, num_workers=cfg["num_workers"])
 
     family_by_stem = dict(zip(valid_df["stem"], valid_df["family"]))
 
     rows = []
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc=f"fold {fold} eval", unit="sac"):
             crops = batch["crops"].to(device)
             cls_logits, reg_logits, _attention = model(crops)
             cls_prob = torch.sigmoid(cls_logits).cpu().numpy()

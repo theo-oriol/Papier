@@ -2,6 +2,13 @@
 condition redrawn fresh every time it's fetched (protocole §4: "tirees en
 ligne, par sac, a chaque passage").
 
+Each row of the fold DataFrame is one (specimen, view) pair - Back, Belly
+and Side are all included (see src/datasets/folds.py) and each is its own
+independent sac, sharing the same species-level habitat label as its
+sibling views. __getitem__ picks the matching view's own directory set
+(src/view_paths.py) before building crops, since a stem only exists inside
+its own view's NPY folder.
+
 `sham=True` reproduces the sham model of protocole §4: same everything, but
 the condition is always the reference (no ablation ever drawn) - the only
 thing that distinguishes the sham run from the main run is that one line.
@@ -21,6 +28,7 @@ from .. import chain
 from ..ablations.combinations import draw_condition
 from ..ablations.common import Condition
 from ..rng import derive_rng
+from ..view_paths import resolve_view_dirs
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -42,17 +50,11 @@ class BagDataset(Dataset):
         # offline cache isn't built yet.
         self.enabled_codes = enabled_codes
         self.stems = df["stem"].to_numpy()
+        self.views = df["view"].to_numpy()
         self.habitats = np.stack(df["habitat"].to_numpy())
-        self.dataset_dir = Path(cfg["dataset_dir"])
-        self.dataset_a1_dir = Path(cfg["dataset_a1_dir"])
-        self.dataset_a2_dir = Path(cfg["dataset_a2_dir"])
-        self.dataset_a7_dir = Path(cfg["dataset_a7_dir"])
-        # A6's offline classification cache (scripts/build_a6_classification_cache.py):
-        # optional and falls back to the online classifier per-specimen when
-        # absent, so this being None or incomplete never breaks a run - see
-        # chain.build_bag()'s dataset_a6_class_dir docstring.
-        a6_class_dir = cfg.get("dataset_a6_classification_dir")
-        self.dataset_a6_class_dir = Path(a6_class_dir) if a6_class_dir else None
+        # one directory set per view (Back/Belly/Side) - each item picks the
+        # one matching its own view in __getitem__, see module docstring.
+        self.view_dirs = resolve_view_dirs(cfg)
         self.run_seed = run_seed
         self.sham = sham
         # bumped by the training loop at the start of every epoch, so the
@@ -67,13 +69,14 @@ class BagDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, object]:
         stem = self.stems[index]
+        dirs = self.view_dirs[self.views[index]]
         # Crée un random generator
         rng = derive_rng(self.run_seed, self.epoch, index, stem)
 
         condition = Condition() if self.sham else draw_condition(rng, enabled_codes=self.enabled_codes)
         crops, meta = chain.build_bag(
-            self.dataset_dir, self.dataset_a1_dir, self.dataset_a2_dir, self.dataset_a7_dir, stem, condition, rng,
-            dataset_a6_class_dir=self.dataset_a6_class_dir,
+            dirs["dataset_dir"], dirs["dataset_a1_dir"], dirs["dataset_a2_dir"], dirs["dataset_a7_dir"], stem, condition, rng,
+            dataset_a6_class_dir=dirs["dataset_a6_class_dir"],
         )
 
         crops = crops.astype(np.float32) / 255.0
